@@ -40,6 +40,9 @@ type RunAttemptState = {
   runOrthogonalLimit: number;
   validationFailures: Set<string>;
   endpointRequirements: Map<string, ValidationDetail[]>;
+  describeAttempts: Set<string>;
+  endpointsKnownToAcceptEmpty: Set<string>;
+  probedEndpoints: Set<string>;
 };
 
 export async function POST(request: Request) {
@@ -66,7 +69,12 @@ export async function POST(request: Request) {
       : DEFAULT_RUN_ORTHOGONAL_LIMIT,
     validationFailures: new Set(),
     endpointRequirements: new Map(),
+    describeAttempts: new Set(),
+    endpointsKnownToAcceptEmpty: new Set(),
+    probedEndpoints: new Set(),
   };
+
+  hydrateRunAttemptStateFromHistory(messages, runAttemptState);
 
   if (latestUserMessage) {
     await saveMessage(conversationId, latestUserMessage);
@@ -77,21 +85,20 @@ export async function POST(request: Request) {
   );
 
   const result = streamText({
-    model: openai("gpt-4o-mini"),
+    model: openai("gpt-4.1"),
     system: [
       "You are a focused AI research assistant for go-to-market data.",
-      "You operate in a strict confirmation-gated workflow before any paid Orthogonal provider call. searchOrthogonalCatalog and searchWeb are free helpers and may run without asking the user. Every other Orthogonal tool (runOrthogonalApi, enrichCompany, describeOrthogonalEndpoint) requires the user to first pick a provider and then confirm the inputs. Process one provider+endpoint per turn. If the user asks for two people or two enrichments, present a plan for the first one, run it after confirmation, then move to the second on a later turn.",
-      "Follow this 7-step protocol on every data-fetching request:",
-      "Step 1 (Discover): Call searchOrthogonalCatalog once with a prompt describing the user's intent. Do this autonomously; do not ask permission.",
-      "Step 2 (Augment): If you need background facts or identifiers (company domain, full name, LinkedIn URL, etc.) to describe the options or build a future call, call searchWeb autonomously. Tell the user in one short line what you are checking. Do not call paid provider tools yet.",
-      "Step 3 (Present and ask which API): Write a brief markdown shortlist of the 2-4 best catalog matches. For each item include: provider name as a markdown link to its baseUrl (for example, ## 1. [Sixtyfour API](https://api.sixtyfour.ai)), endpoint path, one-line description, the inputs you believe it needs (best-effort inferred from the description), and the price if shown. End the message with a direct question like 'Which one should I use?'. Do NOT call any tool in this turn. The turn ends here, awaiting the user's choice.",
-      "Step 4 (Gather inputs): Once the user has picked a provider/endpoint, derive missing inputs from prior conversation context or one searchWeb call. Do not call paid provider tools yet.",
-      "Step 5 (Confirm inputs): Write the exact planned call back to the user: the provider slug, the literal endpoint path (for example /find-email), the full body/query JSON you intend to send, and the expected price from the catalog. End with a direct question like 'Confirm to proceed?'. Your Step 5 message MUST contain the literal endpoint path and the word 'Confirm'. The app inspects your previous assistant message for these two tokens before allowing the paid call; if they are missing the tool returns notCalled=true with a confirmation-gate error and your money is not spent. Do NOT call any tool in this turn. The turn ends here.",
-      "Step 6 (Execute): Only when the latest user message reads as a confirmation, call runOrthogonalApi (or enrichCompany if the user picked the company-enrich domain enricher) exactly once with the confirmed inputs. Use describeOrthogonalEndpoint in this step only if the catalog description was too vague to infer the body shape AND you have not yet made any paid call this turn; note that doing so consumes the one paid call budget for this turn. If you receive notCalled with blockedReason mentioning the confirmation gate, do NOT retry the tool. Stop tool use, write a Step 5 confirmation message that names the path and the word 'Confirm', and wait for the user.",
-      "Step 7 (Report): After the call returns, cite the provider slug, endpoint path, requestId, and price (or cost). If the result has isError, isValidationError, isEmpty, or notCalled set to true, explain what was missing or wrong and ask the user how to proceed: adjust inputs (go back to step 5) or pick a different provider (go back to step 3). Never auto-retry without explicit user confirmation.",
-      "State recovery: Before any tool call or text reply, read the conversation history to determine which protocol step you are on. If your previous assistant message presented options and asked which to use, the next user message is a provider selection - move to Step 4, not Step 6. If your previous assistant message stated a planned call body and asked to confirm (containing the path and the word 'Confirm'), the next user message is a confirmation (or rejection) - then and only then move to Step 6. Even when the user names a specific provider in their message (for example 'try sixtyfour' or 'use apollo'), treat that as a Step 3 selection. You still must proceed through Step 4 (Gather inputs) and Step 5 (Confirm inputs) before calling any paid tool. Never skip Step 5.",
-      "Exceptions: If the user asks a purely conversational question that needs no data fetch, skip the protocol and answer directly. If searchOrthogonalCatalog returns zero useful matches, tell the user honestly and ask for clarification instead of inventing a call.",
-      "When listing API providers in step 3, make each provider heading a markdown link to its base URL, like ## 2. [Apollo API](https://api.apollo.io). Do not add a separate Base URL bullet when the heading already links to the base URL. Write Endpoints: as plain text, then put endpoint entries as indented bullets below it.",
+      "Default to action. Every clarifying question you can answer with searchWeb or describeOrthogonalEndpoint is one you must not ask the user. The user wants you to drive — not interview them. The only user touchpoint per paid call is the Step 3 confirmation message below.",
+      "searchOrthogonalCatalog, searchWeb, and describeOrthogonalEndpoint are free helpers; chain them aggressively to assemble the call yourself. runOrthogonalApi and enrichCompany are paid and gated by a single confirmation message. One paid call per response.",
+      "Follow this 4-step protocol on every data-fetching request:",
+      "Step 1 (Discover, Augment, Select — autonomous): Call searchOrthogonalCatalog once with a prompt describing the user's intent. Pick the single best matching provider+endpoint yourself; do not ask the user to choose. Then, in the same turn, call searchWeb as many times as needed to derive every identifier the call will need (company domain, person's full name, LinkedIn URL, exact title, location, etc.). Use multiple searchWeb queries if the first is thin. Do not ask the user for an identifier you could look up. Narrate briefly in one short line what you're looking up — do not write a long plan.",
+      "Step 2 (Probe schema — autonomous): In the same turn, call describeOrthogonalEndpoint(api, path) for the endpoint you selected. It is a FREE probe — the upstream rejects an empty body with a validation error and Orthogonal does not charge you. The returned errorDetail (array of {field, type, msg}) lists the exact required field names and nesting. Read it carefully; you will mirror it in Step 3.",
+      "Step 3 (Confirm — the only user touchpoint): In the same turn as Steps 1 and 2, write the exact planned call back to the user: the provider slug, the literal endpoint path (for example /find-email), and the full body/query JSON you intend to send — using the field names and nesting exactly as they appeared in describeOrthogonalEndpoint's errorDetail. If errorDetail listed a field like 'body.lead.name', body must contain a 'lead' object with a 'name' key — do not flatten. Include the expected price from the catalog. End with 'Confirm to proceed?'. Your Step 3 message MUST contain the literal endpoint path and the word 'Confirm'. The app inspects your previous assistant message for these two tokens before allowing the paid call; if they are missing the tool returns notCalled=true and no money is spent. Do NOT call runOrthogonalApi or enrichCompany in this turn. The turn ends here.",
+      "Step 4 (Execute): Only when the latest user message reads as a confirmation, call runOrthogonalApi (or enrichCompany for the company-enrich domain enricher) exactly once with the confirmed inputs. The body shape must match what you presented in Step 3, which itself must match the describeOrthogonalEndpoint errorDetail. If you receive notCalled with blockedReason mentioning 'schema not yet known', call describeOrthogonalEndpoint first. If you receive notCalled with blockedReason mentioning the confirmation gate, write a fresh Step 3 message and wait.",
+      "Step 5 (Report): After the call returns, cite the provider slug, endpoint path, requestId, and price. Recovery is autonomous: on isValidationError, re-read errorDetail, fix the body, and re-present Step 3 yourself — do not ask the user to correct field nesting. On isEmpty, run one more searchWeb for a stronger identifier (domain, LinkedIn URL, full name) and re-present Step 3 with the better input. On a hard isError from the provider, tell the user what failed and stop. Only ask the user for help when searchWeb has genuinely returned nothing usable after a real attempt.",
+      "State recovery: Before any tool call or text reply, scan the conversation history. If your previous assistant message stated a planned call body and asked to confirm (containing the path and the word 'Confirm'), and the latest user message reads as a confirmation, go straight to Step 4. Otherwise you are starting a fresh request — run Steps 1–3 in a single turn and stop at Step 3. Never call a paid tool without a Step 3 message preceding it in this conversation.",
+      "Underspecified requests: If the user's first message is genuinely missing a target (e.g. 'find this company's cofounder's email' with no company named) AND a quick searchWeb cannot disambiguate, ask the one missing piece of information — but only that. Do not also ask which provider, which endpoint, or which inputs. If searchOrthogonalCatalog returns nothing useful, say so plainly and stop. Do not invent a call. Do not ask the user to suggest providers.",
+      "Formatting: In Step 3, name the chosen provider as a planned-call heading where only the provider name is linked, like ## Planning to call: [Sixtyfour API](https://api.sixtyfour.ai). Put the endpoint path on the next line, then the body JSON in a code block, then price, then 'Confirm to proceed?'. Never use a bare provider heading like ## [Sixtyfour API](https://api.sixtyfour.ai).",
       "Do not invent data. If a tool returns no useful data, say so clearly. Keep answers concise.",
     ].join(" "),
     messages: modelMessages,
@@ -99,7 +106,7 @@ export async function POST(request: Request) {
     tools: {
       searchOrthogonalCatalog: tool({
         description:
-          "Step 1 (Discover) of the gated workflow. Search Orthogonal's API catalog for providers/endpoints that can answer the user's request. Free helper - run autonomously without asking permission. Results will be summarized to the user in step 3 for them to choose a provider.",
+          "Step 1 of the protocol. Search Orthogonal's API catalog for providers/endpoints that can answer the user's request. Free helper — run first on every data request. You will auto-select the single best match; do not ask the user to choose.",
         inputSchema: z.object({
           prompt: z
             .string()
@@ -120,7 +127,7 @@ export async function POST(request: Request) {
       }),
       searchWeb: tool({
         description:
-          "Step 2 (Augment) or step 4 (Gather inputs) of the gated workflow. Search the web through Orthogonal for current news, websites, company facts, people, leadership, or public web results. Free helper - run autonomously to gather background or derive missing identifiers (such as a company domain or LinkedIn URL). Tell the user in one short line what you are checking. Do NOT use this to make the user's primary paid call.",
+          "Step 1 helper. Search the web through Orthogonal for current news, websites, company facts, people, leadership, or public web results. Free helper — run autonomously as many times as needed to derive any missing identifier (company domain, person's name, LinkedIn URL, exact title, location, etc.) before constructing a paid call. Prefer one more searchWeb over asking the user. Tell the user in one short line what you are checking. Do NOT use this for the user's primary paid call.",
         inputSchema: z.object({
           query: z.string().describe("The web search query to run."),
         }),
@@ -138,7 +145,7 @@ export async function POST(request: Request) {
       }),
       enrichCompany: tool({
         description:
-          "Step 6 (Execute) of the gated workflow when the user selected the company-enrich domain enricher. Paid provider call. Only invoke after the user has selected this option in step 3 and confirmed the exact domain in step 5. If you have not yet completed those gates, present the option to the user first and wait for confirmation.",
+          "Step 4 (Execute) for the company-enrich domain enricher. Paid provider call. Only invoke after a Step 3 confirmation message naming /companies/enrich and containing the word 'Confirm' has been sent and the latest user message reads as a confirmation. If the confirmation gate blocks the call, write a fresh Step 3 message — do not retry.",
         inputSchema: z.object({
           domain: z
             .string()
@@ -177,7 +184,7 @@ export async function POST(request: Request) {
       }),
       runOrthogonalApi: tool({
         description:
-          "Step 6 (Execute) of the gated workflow. Paid provider call. Only invoke after BOTH gates have been cleared: the user selected this exact api/path in step 3, and the user confirmed the body/query in step 5. If you are uncertain whether the user has confirmed in the most recent message, do not call - ask again in plain text instead. The app enforces a one-call-per-turn budget and may return notCalled if state suggests the call is unsafe. On isError, isValidationError, isEmpty, or notCalled: explain to the user what went wrong and return to step 5 (different inputs) or step 3 (different provider). Never auto-retry without a fresh user confirmation.",
+          "Step 4 (Execute). Paid provider call. Only invoke after TWO technical gates have been cleared: (1) describeOrthogonalEndpoint has been called for this exact api/path in this response so the schema is known, and (2) your previous assistant message contains the literal endpoint path and the word 'Confirm', and the latest user message reads as a confirmation. The body shape MUST match the field names and nesting from describeOrthogonalEndpoint's errorDetail. The app enforces one paid call per response and will return notCalled with blockedReason='schema not yet known' if you skipped the describe probe. Recovery is autonomous: on isValidationError, fix the body from errorDetail and re-present Step 3 yourself; on isEmpty, run one more searchWeb for a stronger identifier and re-present Step 3; on a hard isError, tell the user what failed and stop.",
         inputSchema: z.object({
           api: z.string().describe("Provider slug, for example apollo."),
           path: z.string().describe("Endpoint path, for example /v1/people/match."),
@@ -223,7 +230,7 @@ export async function POST(request: Request) {
       }),
       describeOrthogonalEndpoint: tool({
         description:
-          "Optional schema probe for step 6 (Execute) of the gated workflow. Paid call that consumes the same one-paid-call-per-turn budget as runOrthogonalApi. Use only when the catalog description from step 1 is too vague to infer the body/query shape AND the user has already cleared both gates (selected the provider in step 3 and confirmed inputs in step 5). Prefer to skip this and let an attempted runOrthogonalApi error guide a corrected retry on the next turn. Returns errorDetail (array of {field, type, msg}) listing required fields when the upstream validates inputs, or acceptsEmpty=true plus a sampleResponse when the endpoint runs on empty input.",
+          "Step 2 (Probe schema) free probe. Run this autonomously after you have auto-selected the best catalog match and before writing the Step 3 confirmation message — same turn. Sends an empty body to the endpoint; the upstream rejects it with a validation error that lists the exact required field names, types, and nesting (returned as errorDetail: array of {field, type, msg}). When the upstream rejects on validation, no money is charged. The rare case where the endpoint accepts an empty body returns acceptsEmpty=true plus a sampleResponse — in that case this counts as a paid call. There is a one-probe-per-endpoint-per-response cap; reuse the prior errorDetail rather than re-probing.",
         inputSchema: z.object({
           api: z.string().describe("Provider slug, for example sixtyfour."),
           path: z
@@ -240,28 +247,53 @@ export async function POST(request: Request) {
             path: input.path,
             prompt: null,
             execute: async () => {
-              const gateBlock = getConfirmationGateBlock(
-                input,
-                lastAssistantText,
-                userDeclined,
-              );
+              const endpointKey = getEndpointKey(input);
 
-              if (gateBlock) {
-                return gateBlock;
+              if (runAttemptState.describeAttempts.has(endpointKey)) {
+                return buildNotCalledResult({
+                  input,
+                  reason:
+                    "this endpoint was already probed this response; reuse the prior errorDetail instead of re-probing",
+                  missingFields: [],
+                });
               }
 
-              const blocked = getPaidCallBudgetBlock(input, runAttemptState);
+              if (runAttemptState.endpointsKnownToAcceptEmpty.has(endpointKey)) {
+                const gateBlock = getConfirmationGateBlock(
+                  input,
+                  lastAssistantText,
+                  userDeclined,
+                );
+                if (gateBlock) return gateBlock;
 
-              if (blocked) {
-                return blocked;
+                const budgetBlock = getPaidCallBudgetBlock(
+                  input,
+                  runAttemptState,
+                );
+                if (budgetBlock) return budgetBlock;
               }
 
-              runAttemptState.runOrthogonalCalls += 1;
+              runAttemptState.describeAttempts.add(endpointKey);
+
               const output = await describeOrthogonalEndpoint(
                 input,
                 options.abortSignal,
               );
+
+              // describeOrthogonalEndpoint returns acceptsEmpty=true only when
+              // the upstream accepted the empty body and produced a real response
+              // — which means a real charge. acceptsEmpty=false means the
+              // upstream rejected with validation, no charge.
+              const acceptsEmpty =
+                isRecord(output) && output.acceptsEmpty === true;
+
+              if (acceptsEmpty) {
+                runAttemptState.runOrthogonalCalls += 1;
+                runAttemptState.endpointsKnownToAcceptEmpty.add(endpointKey);
+              }
+
               rememberEndpointRequirements(input, output, runAttemptState);
+              runAttemptState.probedEndpoints.add(endpointKey);
 
               return output;
             },
@@ -276,10 +308,29 @@ export async function POST(request: Request) {
     onFinish: async ({ responseMessage }) => {
       await saveMessage(conversationId, responseMessage as UIMessage);
     },
-    onError: (error) =>
-      error instanceof Error
-        ? error.message
-        : "The assistant hit an unexpected error.",
+    onError: (error) => {
+      console.error("[chat stream onError]", error);
+
+      if (error instanceof Error) {
+        if (error.stack) {
+          console.error(error.stack);
+        }
+        return error.message;
+      }
+
+      try {
+        const serialized = JSON.stringify(error);
+        if (serialized) {
+          return serialized.length > 200
+            ? `${serialized.slice(0, 200)}…`
+            : serialized;
+        }
+      } catch {
+        // fall through to generic message
+      }
+
+      return "The assistant hit an unexpected error.";
+    },
   });
 }
 
@@ -371,7 +422,7 @@ async function runTrackedTool({
       success: false,
       isError: true,
       error: message,
-      hint: "Tell the user the Orthogonal call failed and suggest a retry or a narrower query.",
+      hint: "Tell the user the call failed. If it looks like a bad identifier, run one more searchWeb and re-present Step 3 yourself.",
     };
   }
 }
@@ -386,6 +437,20 @@ function getRunReadinessBlock(
   state: RunAttemptState,
 ) {
   const endpointKey = getEndpointKey(input);
+
+  const schemaKnown =
+    state.endpointRequirements.has(endpointKey) ||
+    state.endpointsKnownToAcceptEmpty.has(endpointKey) ||
+    state.probedEndpoints.has(endpointKey);
+
+  if (!schemaKnown) {
+    return buildNotCalledResult({
+      input,
+      reason:
+        "this endpoint has not been probed yet in this conversation. Call describeOrthogonalEndpoint(api, path) once before runOrthogonalApi — it is a free probe and its errorDetail lists any required fields. If the probe already ran but returned no errorDetail, proceed with the call you planned and surface whatever the upstream says",
+      missingFields: [],
+    });
+  }
 
   if (state.validationFailures.has(endpointKey)) {
     return buildNotCalledResult({
@@ -480,6 +545,49 @@ function rememberEndpointRequirements(
   }
 }
 
+function hydrateRunAttemptStateFromHistory(
+  messages: UIMessage[],
+  state: RunAttemptState,
+) {
+  for (const message of messages) {
+    if (!message.parts) continue;
+
+    for (const part of message.parts) {
+      const partType = (part as { type?: string }).type;
+
+      if (
+        partType !== "tool-describeOrthogonalEndpoint" &&
+        partType !== "tool-runOrthogonalApi"
+      ) {
+        continue;
+      }
+
+      const input = (part as { input?: unknown }).input;
+      const output = (part as { output?: unknown }).output;
+
+      if (!isRecord(input) || !isRecord(output)) continue;
+      if (output.notCalled === true) continue;
+
+      const api = typeof input.api === "string" ? input.api : null;
+      const path = typeof input.path === "string" ? input.path : null;
+
+      if (!api || !path) continue;
+
+      const endpointInput = { api, path };
+
+      rememberEndpointRequirements(endpointInput, output, state);
+
+      if (partType === "tool-describeOrthogonalEndpoint") {
+        state.probedEndpoints.add(getEndpointKey(endpointInput));
+
+        if (output.acceptsEmpty === true) {
+          state.endpointsKnownToAcceptEmpty.add(getEndpointKey(endpointInput));
+        }
+      }
+    }
+  }
+}
+
 function buildNotCalledResult({
   input,
   reason,
@@ -507,7 +615,7 @@ function buildNotCalledResult({
     blockedReason: reason,
     summary,
     nextStepHint:
-      "Ask the user for the missing identifiers or confirm a corrected request before making another Orthogonal call.",
+      "If the block was the confirmation gate, write a fresh Step 3 confirmation message containing the endpoint path and the word 'Confirm' and stop. If identifiers are missing, run searchWeb to derive them before re-presenting Step 3 — do not ask the user.",
     raw: {
       notCalled: true,
       reason,
@@ -678,7 +786,25 @@ function getLastAssistantText(messages: UIMessage[]) {
 }
 
 function userMessageReadsAsDecline(text: string) {
-  return /\b(no|cancel|stop|wait|nevermind|don'?t|do not)\b/i.test(text);
+  const trimmed = text.trim();
+
+  if (!trimmed) {
+    return false;
+  }
+
+  // Standalone decline messages: "no", "no.", "stop!", "wait", "nevermind"
+  if (/^(no|cancel|stop|wait|nevermind|don'?t|do not)\b[.,!?\s]*$/i.test(trimmed)) {
+    return true;
+  }
+
+  // Messages that lead with a decline followed by elaboration: "no thanks",
+  // "don't run that", "stop, use the other one". "wait" is excluded here
+  // because it commonly appears as a clarifier ("wait, also include X").
+  if (/^(no|cancel|stop|nevermind|don'?t|do not)[\s,.!?-]/i.test(trimmed)) {
+    return true;
+  }
+
+  return false;
 }
 
 function getConfirmationGateBlock(
@@ -702,7 +828,7 @@ function getConfirmationGateBlock(
   if (!hasPath || !hasConfirmToken) {
     return buildNotCalledResult({
       input,
-      reason: `confirmation gate not satisfied: your previous assistant message did not present this call (path=${input.path}) with the word "confirm". Write a Step 5 message that names the provider slug, endpoint path, the full body/query JSON, and ends with "Confirm to proceed?", then wait for the user`,
+      reason: `confirmation gate not satisfied: your previous assistant message did not present path=${input.path} with the word "confirm". Write a Step 3 message naming the provider slug, endpoint path, full body/query JSON, and ending with "Confirm to proceed?", then stop.`,
       missingFields: [],
     });
   }

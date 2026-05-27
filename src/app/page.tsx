@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
 import {
@@ -35,6 +35,25 @@ type BulletItem = {
 };
 
 type ScrollMode = "history-load" | "new-message" | "streaming" | "idle";
+type ToolStateKind = "running" | "done" | "error" | "skipped";
+
+const SUGGESTED_PROMPTS = [
+  {
+    label: "Company brief",
+    hint: "Profile a company with funding, people, and recent news.",
+    prompt: "Give me a brief on Anthropic — funding, founders, and recent news.",
+  },
+  {
+    label: "Contact lookup",
+    hint: "Surface email and role for a person at a target company.",
+    prompt: "Find the work email for the head of engineering at Linear.",
+  },
+  {
+    label: "Web research",
+    hint: "Fresh web results synthesized into a short answer.",
+    prompt: "Summarize recent reporting on the EU AI Act implementation.",
+  },
+];
 
 export default function Home() {
   const [input, setInput] = useState("");
@@ -44,6 +63,7 @@ export default function Home() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [historyError, setHistoryError] = useState("");
   const [isLoadingConversation, setIsLoadingConversation] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const scrollModeRef = useRef<ScrollMode>("idle");
@@ -117,6 +137,14 @@ export default function Home() {
       scrollModeRef.current = "idle";
     }
   }, [isWorking, messages]);
+
+  function startNewChat() {
+    scrollModeRef.current = "idle";
+    setActiveConversationId("");
+    setMessages([]);
+    setInput("");
+    clearError();
+  }
 
   async function createConversation() {
     const response = await fetch("/api/conversations", {
@@ -192,14 +220,6 @@ export default function Home() {
     }
   }
 
-  function startNewChat() {
-    scrollModeRef.current = "idle";
-    setActiveConversationId("");
-    setMessages([]);
-    setInput("");
-    clearError();
-  }
-
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const trimmedInput = input.trim();
@@ -218,72 +238,123 @@ export default function Home() {
     );
   }
 
+  const groupedConversations = useMemo(
+    () => groupConversations(filterConversations(conversations, searchQuery)),
+    [conversations, searchQuery],
+  );
+  const activeConversation = useMemo(
+    () => conversations.find((c) => c.id === activeConversationId),
+    [conversations, activeConversationId],
+  );
+
   return (
-    <main className="flex h-dvh overflow-hidden bg-white text-[#171717]">
+    <main className="relative flex h-dvh overflow-hidden bg-[var(--paper)] text-[var(--ink)]">
       <aside
-        className={`fixed inset-y-0 left-0 z-30 flex h-dvh w-72 flex-col border-r border-[#ededed] bg-[#f9f9f9] transition-transform duration-200 lg:static ${
-          isSidebarOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
+        className={`fixed inset-y-0 left-0 z-30 flex h-dvh w-[280px] flex-col overflow-hidden border-r border-[var(--hairline)] bg-[var(--paper-soft)]/85 backdrop-blur-xl transition-[transform,width] duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] lg:static lg:translate-x-0 ${
+          isSidebarOpen
+            ? "translate-x-0"
+            : "-translate-x-full lg:w-0 lg:border-r-0"
         }`}
+        aria-label="Conversation history"
       >
-        <div className="flex h-16 items-center justify-between px-4">
-          <p className="text-lg font-semibold text-[#171717]">
-            Orthogonal Chat
-          </p>
+        <div className="flex h-14 shrink-0 items-center justify-between px-3">
+          <div className="flex min-w-0 items-center gap-2.5">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="/orthogonal-mark.svg"
+              alt=""
+              className="size-8 shrink-0 rounded-lg"
+            />
+            <span className="truncate text-[15px] font-semibold tracking-[-0.01em] text-[var(--ink)]">
+              Orthogonal Chat
+            </span>
+          </div>
           <button
             type="button"
             onClick={() => setIsSidebarOpen(false)}
-            className="grid size-9 place-items-center rounded-lg text-[#6b6b6b] hover:bg-[#ececec] lg:hidden"
-            aria-label="Close sidebar"
-            title="Close sidebar"
+            className="grid size-9 place-items-center rounded-md text-[var(--muted)] transition hover:bg-[var(--hairline)]/60 hover:text-[var(--ink)]"
+            aria-label="Collapse sidebar"
+            title="Collapse sidebar"
           >
             <PanelLeftClose className="size-4" />
           </button>
         </div>
 
-        <div className="space-y-1 px-2 pb-3">
+        <div className="space-y-2 px-3">
           <button
             type="button"
             onClick={startNewChat}
-            className="flex h-11 w-full items-center gap-3 rounded-xl px-3 text-sm font-medium text-[#171717] hover:bg-[#ececec]"
+            className="group flex h-10 w-full items-center gap-2.5 rounded-lg border border-[var(--hairline)] bg-[var(--surface)] px-3 text-[13px] font-medium text-[var(--ink)] shadow-[0_1px_0_rgba(0,0,0,0.03)] transition hover:border-[var(--hairline-strong)] hover:shadow-[0_4px_18px_-12px_rgba(0,0,0,0.18)]"
           >
-            <MessageSquarePlus className="size-4" />
+            <MessageSquarePlus className="size-3.5 text-[var(--muted)] transition group-hover:text-[var(--ink)]" />
             New chat
           </button>
-          <div className="flex h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-[#555]">
-            <Search className="size-4" />
-            Search chats
-          </div>
+
+          <label className="flex h-9 w-full items-center gap-2 rounded-lg border border-transparent bg-[var(--hairline)]/40 px-3 text-[13px] text-[var(--muted)] transition focus-within:border-[var(--hairline-strong)] focus-within:bg-[var(--surface)]">
+            <Search className="size-3.5" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="Search chats"
+              className="flex-1 bg-transparent text-[13px] text-[var(--ink)] outline-none placeholder:text-[var(--muted)]"
+            />
+          </label>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+        <div className="scrollbar-fine mt-3 min-h-0 flex-1 overflow-y-auto px-2 pb-3">
           {historyError ? (
-            <div className="m-2 rounded-xl border border-[#f3d5c9] bg-[#fff7f4] p-3 text-sm text-[#9a3412]">
+            <div className="m-2 rounded-lg border border-[var(--warm-warning-border)] bg-[var(--warm-warning-bg)] p-2.5 text-[12px] leading-5 text-[var(--warm-warning-ink)]">
               {historyError}
             </div>
           ) : null}
 
-          {conversations.length === 0 ? (
-            <div className="px-3 py-6 text-sm leading-6 text-[#8a8a8a]">
-              No saved chats yet.
-            </div>
+          {groupedConversations.length === 0 ? (
+            <p className="px-3 py-5 text-[13px] leading-6 text-[var(--muted)]">
+              {searchQuery.trim()
+                ? "No chats match that search."
+                : "Start a conversation and it will appear here."}
+            </p>
           ) : (
-            <div className="space-y-1">
-              {conversations.map((conversation) => (
-                <button
-                  key={conversation.id}
-                  type="button"
-                  onClick={() => void loadConversation(conversation.id)}
-                  className={`flex w-full items-start rounded-xl px-3 py-2.5 text-left text-sm transition ${
-                    conversation.id === activeConversationId
-                      ? "bg-[#ececec] text-[#171717]"
-                      : "text-[#444] hover:bg-[#f0f0f0]"
-                  }`}
-                >
-                  <span className="line-clamp-2">{conversation.title}</span>
-                </button>
+            <div className="space-y-5">
+              {groupedConversations.map(([groupName, items]) => (
+                <div key={groupName} className="space-y-0.5">
+                  <p className="px-3 pb-1 text-[10px] font-medium uppercase tracking-[0.18em] text-[var(--muted)]">
+                    {groupName}
+                  </p>
+                  {items.map((conversation) => {
+                    const isActive =
+                      conversation.id === activeConversationId;
+                    return (
+                      <button
+                        key={conversation.id}
+                        type="button"
+                        onClick={() => void loadConversation(conversation.id)}
+                        className={`group relative flex w-full items-center rounded-lg px-3 py-2 text-left text-[13px] leading-5 transition-colors duration-150 ${
+                          isActive
+                            ? "bg-[var(--surface)] text-[var(--ink)] shadow-[0_1px_0_rgba(0,0,0,0.04)]"
+                            : "text-[var(--ink-soft)] hover:bg-[var(--surface)]/60 hover:text-[var(--ink)]"
+                        }`}
+                      >
+                        {isActive ? (
+                          <span className="absolute inset-y-1.5 left-0 w-[2px] rounded-full bg-[var(--accent)]" />
+                        ) : null}
+                        <span className="line-clamp-2">
+                          {conversation.title}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
               ))}
             </div>
           )}
+        </div>
+
+        <div className="shrink-0 border-t border-[var(--hairline)] px-5 py-3">
+          <p className="text-[11px] leading-5 text-[var(--muted)]">
+            Live data via the Orthogonal API catalog.
+          </p>
         </div>
       </aside>
 
@@ -291,40 +362,48 @@ export default function Home() {
         <button
           type="button"
           aria-label="Close sidebar overlay"
-          className="fixed inset-0 z-20 bg-black/20 lg:hidden"
+          className="animate-fade fixed inset-0 z-20 bg-[var(--ink)]/20 backdrop-blur-sm lg:hidden"
           onClick={() => setIsSidebarOpen(false)}
         />
       ) : null}
 
-      <section className="flex h-dvh min-w-0 flex-1 flex-col overflow-hidden bg-white">
-        <header className="flex h-14 items-center justify-between px-4">
-          <div className="flex items-center gap-3">
+      <section className="relative flex h-dvh min-w-0 flex-1 flex-col overflow-hidden bg-[var(--paper)]">
+        <header className="flex h-14 shrink-0 items-center justify-between px-5">
+          <div className="flex min-w-0 items-center gap-3">
             <button
               type="button"
-              onClick={() => setIsSidebarOpen(true)}
-              className="grid size-9 place-items-center rounded-lg text-[#555] hover:bg-[#f2f2f2] lg:hidden"
-              aria-label="Open sidebar"
-              title="Open sidebar"
+              onClick={() => setIsSidebarOpen((open) => !open)}
+              className="grid size-9 place-items-center rounded-md text-[var(--muted)] transition hover:bg-[var(--hairline)]/60 hover:text-[var(--ink)]"
+              aria-label={isSidebarOpen ? "Close sidebar" : "Open sidebar"}
+              title={isSidebarOpen ? "Close sidebar" : "Open sidebar"}
             >
-              <Menu className="size-5" />
+              <Menu className="size-4" />
             </button>
+            {activeConversation ? (
+              <span className="hidden truncate text-[13px] text-[var(--ink-soft)] sm:inline">
+                {activeConversation.title}
+              </span>
+            ) : null}
           </div>
         </header>
 
-        <div ref={scrollContainerRef} className="min-h-0 flex-1 overflow-y-auto px-4">
+        <div
+          ref={scrollContainerRef}
+          className="scrollbar-fine min-h-0 flex-1 overflow-y-auto px-5"
+        >
           <div
-            className={`mx-auto flex min-h-full w-full max-w-[54rem] flex-col ${
-              messages.length === 0 ? "justify-center" : "gap-7 py-7"
+            className={`mx-auto flex min-h-full w-full max-w-[44rem] flex-col ${
+              messages.length === 0 ? "justify-center" : "gap-8 py-10"
             }`}
           >
             {isLoadingConversation ? (
-              <div className="flex items-center gap-2 text-sm text-[#6b6b6b]">
-                <Loader2 className="size-4 animate-spin" />
+              <div className="animate-fade flex items-center gap-2 text-[13px] text-[var(--muted)]">
+                <Loader2 className="size-3.5 animate-spin" />
                 Loading conversation
               </div>
             ) : null}
 
-            {messages.length === 0 ? (
+            {messages.length === 0 && !isLoadingConversation ? (
               <EmptyState
                 input={input}
                 isWorking={isWorking}
@@ -340,15 +419,10 @@ export default function Home() {
               <ChatMessage key={message.id} message={message} />
             ))}
 
-            {isWorking ? (
-              <div className="flex items-center gap-2 pl-1 text-sm text-[#6b6b6b]">
-                <Loader2 className="size-4 animate-spin" />
-                Thinking
-              </div>
-            ) : null}
+            {isWorking ? <ThinkingIndicator /> : null}
 
             {error ? (
-              <div className="flex items-start gap-2 rounded-xl border border-[#f3d5c9] bg-[#fff7f4] p-3 text-sm text-[#9a3412]">
+              <div className="animate-rise flex items-start gap-2.5 rounded-xl border border-[var(--warm-warning-border)] bg-[var(--warm-warning-bg)] p-3 text-[13px] leading-6 text-[var(--warm-warning-ink)]">
                 <AlertCircle className="mt-0.5 size-4 shrink-0" />
                 <span>{error.message}</span>
               </div>
@@ -358,20 +432,20 @@ export default function Home() {
           </div>
         </div>
 
-        <div
-          className={`bg-white px-4 pb-5 pt-2 ${
-            messages.length === 0 ? "hidden" : "block"
-          }`}
-        >
-          <Composer
-            input={input}
-            isWorking={isWorking}
-            userId={userId}
-            onInputChange={setInput}
-            onSubmit={handleSubmit}
-            onStop={stop}
-          />
-        </div>
+        {messages.length > 0 ? (
+          <div className="shrink-0 bg-gradient-to-t from-[var(--paper)] via-[var(--paper)]/95 to-transparent px-5 pb-5 pt-4">
+            <div className="mx-auto w-full max-w-[44rem]">
+              <Composer
+                input={input}
+                isWorking={isWorking}
+                userId={userId}
+                onInputChange={setInput}
+                onSubmit={handleSubmit}
+                onStop={stop}
+              />
+            </div>
+          </div>
+        ) : null}
       </section>
     </main>
   );
@@ -394,36 +468,54 @@ function EmptyState({
   onSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
   onStop: () => Promise<void>;
 }) {
-  const prompts = [
-    "Company info",
-    "Recent web results",
-    "Find contact APIs",
-  ];
-
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col items-center gap-6 px-2 pb-24">
-      <h2 className="text-center text-2xl font-medium tracking-normal text-[#171717] sm:text-[32px]">
-        What can I help with?
-      </h2>
+    <div className="mx-auto flex w-full max-w-[36rem] flex-col items-center gap-8 pb-12">
+      <div className="space-y-3 text-center">
+        <h1
+          className="animate-rise text-[40px] font-medium leading-[1.05] tracking-[-0.02em] text-[var(--ink)] sm:text-[48px]"
+          style={{ animationDelay: "0ms" }}
+        >
+          What are we
+          <br />
+          looking into?
+        </h1>
+        <p
+          className="animate-rise text-[14px] leading-6 text-[var(--muted)]"
+          style={{ animationDelay: "80ms" }}
+        >
+          Ask anything.
+        </p>
+      </div>
 
-      <Composer
-        input={input}
-        isWorking={isWorking}
-        userId={userId}
-        onInputChange={onInputChange}
-        onSubmit={onSubmit}
-        onStop={onStop}
-      />
+      <div
+        className="animate-rise w-full"
+        style={{ animationDelay: "180ms" }}
+      >
+        <Composer
+          input={input}
+          isWorking={isWorking}
+          userId={userId}
+          onInputChange={onInputChange}
+          onSubmit={onSubmit}
+          onStop={onStop}
+        />
+      </div>
 
-      <div className="flex flex-wrap justify-center gap-2">
-        {prompts.map((prompt) => (
+      <div className="grid w-full grid-cols-1 gap-2 sm:grid-cols-3">
+        {SUGGESTED_PROMPTS.map((prompt, index) => (
           <button
-            key={prompt}
+            key={prompt.label}
             type="button"
-            onClick={() => onPick(prompt)}
-            className="rounded-full border border-[#e5e5e5] bg-white px-3.5 py-1.5 text-[13px] text-[#5f5f5f] hover:bg-[#f7f7f7]"
+            onClick={() => onPick(prompt.prompt)}
+            className="animate-rise group flex flex-col items-start gap-1.5 rounded-xl border border-[var(--hairline)] bg-[var(--surface)] p-4 text-left transition duration-200 hover:-translate-y-0.5 hover:border-[var(--hairline-strong)] hover:shadow-[0_10px_28px_-16px_rgba(0,0,0,0.18)]"
+            style={{ animationDelay: `${260 + index * 60}ms` }}
           >
-            {prompt}
+            <span className="text-[13px] font-medium text-[var(--ink)]">
+              {prompt.label}
+            </span>
+            <span className="text-[12px] leading-5 text-[var(--muted)]">
+              {prompt.hint}
+            </span>
           </button>
         ))}
       </div>
@@ -446,10 +538,17 @@ function Composer({
   onSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
   onStop: () => Promise<void>;
 }) {
+  const [isFocused, setIsFocused] = useState(false);
+  const hasInput = input.trim().length > 0;
+
   return (
     <form
       onSubmit={(event) => void onSubmit(event)}
-      className="mx-auto flex w-full max-w-3xl items-end gap-2 rounded-[1.5rem] border border-[#d9d9d9] bg-white p-2 pl-5 shadow-[0_10px_30px_rgba(0,0,0,0.06)]"
+      className={`group mx-auto flex w-full items-center gap-2 rounded-[20px] border bg-[var(--surface)] p-2 pl-4 transition-all duration-200 ease-out ${
+        isFocused
+          ? "border-[var(--ink)]/30 shadow-[0_10px_36px_-14px_rgba(0,0,0,0.22)]"
+          : "border-[var(--hairline)] shadow-[0_2px_10px_-4px_rgba(0,0,0,0.06)]"
+      }`}
     >
       <label className="sr-only" htmlFor="chat-input">
         Message
@@ -458,38 +557,53 @@ function Composer({
         id="chat-input"
         value={input}
         onChange={(event) => onInputChange(event.target.value)}
+        onFocus={() => setIsFocused(true)}
+        onBlur={() => setIsFocused(false)}
         onKeyDown={(event) => {
           if (event.key === "Enter" && !event.shiftKey) {
             event.preventDefault();
             event.currentTarget.form?.requestSubmit();
           }
         }}
-        placeholder="Reply..."
-        className="max-h-36 min-h-10 flex-1 resize-none bg-transparent py-2.5 text-[15px] leading-6 text-[#171717] outline-none placeholder:text-[#98a2b3]"
+        placeholder="Ask Orthogonal anything…"
+        className="max-h-36 min-h-10 flex-1 resize-none bg-transparent py-2.5 text-[15px] leading-6 text-[var(--ink)] outline-none placeholder:text-[var(--muted-soft)]"
         rows={1}
       />
       {isWorking ? (
         <button
           type="button"
           onClick={() => void onStop()}
-          className="grid size-10 shrink-0 place-items-center rounded-full bg-[#171717] text-white hover:bg-[#333] disabled:cursor-not-allowed"
+          className="grid size-9 shrink-0 place-items-center rounded-full bg-[var(--ink)] text-[var(--paper)] transition hover:bg-[var(--ink-soft)]"
           aria-label="Stop response"
           title="Stop response"
         >
-          <Square className="size-4 fill-current" />
+          <Square className="size-3.5 fill-current" />
         </button>
       ) : (
         <button
           type="submit"
-          disabled={!input.trim() || !userId}
-          className="grid size-10 shrink-0 place-items-center rounded-full bg-[#171717] text-white hover:bg-[#333] disabled:cursor-not-allowed disabled:bg-[#d7d7d7]"
+          disabled={!hasInput || !userId}
+          className="grid size-9 shrink-0 place-items-center rounded-full bg-[var(--ink)] text-[var(--paper)] transition duration-200 hover:bg-[var(--ink-soft)] disabled:cursor-not-allowed disabled:bg-[var(--hairline-strong)] disabled:text-[var(--muted)]"
           aria-label="Send message"
           title="Send message"
         >
-          <Send className="size-4" />
+          <Send className="size-3.5" />
         </button>
       )}
     </form>
+  );
+}
+
+function ThinkingIndicator() {
+  return (
+    <div className="animate-fade flex items-center gap-2 pl-1 text-[13px] text-[var(--muted)]">
+      <span className="flex items-center gap-1">
+        <span className="thinking-dot inline-block size-1.5 rounded-full bg-[var(--ink)]/45" />
+        <span className="thinking-dot inline-block size-1.5 rounded-full bg-[var(--ink)]/45" />
+        <span className="thinking-dot inline-block size-1.5 rounded-full bg-[var(--ink)]/45" />
+      </span>
+      <span className="ml-1">Thinking</span>
+    </div>
   );
 }
 
@@ -498,17 +612,19 @@ function ChatMessage({ message }: { message: UIMessage }) {
 
   return (
     <article
-      className={`flex ${isUser ? "justify-end" : "justify-start"}`}
+      className={`animate-rise flex ${
+        isUser ? "justify-end" : "justify-start"
+      }`}
       aria-label={`${message.role} message`}
     >
       <div
-        className={`max-w-[min(48rem,92vw)] text-[15px] leading-7 text-[#344054] ${
+        className={
           isUser
-            ? "rounded-[1.35rem] bg-[#f3f4f6] px-5 py-2.5 text-[#111827]"
-            : "px-1 py-1"
-        }`}
+            ? "max-w-[min(36rem,88vw)] rounded-[18px] rounded-br-md bg-[var(--ink)] px-4 py-2.5 text-[14.5px] leading-6 text-[var(--paper)]"
+            : "w-full max-w-[min(44rem,92vw)] text-[15px] leading-7 text-[var(--ink-soft)]"
+        }
       >
-        <div className="space-y-4">
+        <div className={isUser ? "" : "space-y-4"}>
           {message.parts.map((part, index) => {
             if (part.type === "text") {
               return (
@@ -542,51 +658,79 @@ function ToolResult({ part }: { part: ToolPart }) {
   const label = getToolLabel(toolName);
   const stateLabel = getToolStateLabel(part);
   const preview = getToolResultPreview(part);
+  const stateKind = getToolStateKind(part);
+
+  const statePillClasses =
+    stateKind === "error"
+      ? "text-[var(--warm-warning-ink)] bg-[var(--warm-warning-bg)]"
+      : stateKind === "running"
+        ? "text-[var(--accent)] bg-[var(--accent)]/8"
+        : stateKind === "skipped"
+          ? "text-[var(--muted)] bg-[var(--hairline)]/60"
+          : "text-[var(--ink-soft)] bg-[var(--hairline)]/60";
 
   return (
-    <div className="relative ml-4 py-1 text-[14px] text-[#344054]">
-      <div className="absolute bottom-3 left-0 top-3 w-px bg-[#d8dee8]" />
-      <div className="ml-6 inline-flex max-w-full items-center gap-3 rounded-full border border-[#d8dee8] bg-white px-3.5 py-1.5 text-[#344054] shadow-sm">
-        <Search className="size-4 shrink-0 text-[#667085]" />
-        <span className="truncate">{label}</span>
-        <ChevronRight className="size-4 shrink-0 text-[#98a2b3]" />
-        <span className="rounded-full bg-[#f2f4f7] px-2 py-0.5 text-[11px] font-medium uppercase tracking-wide text-[#667085]">
+    <div className="animate-fade relative pl-5 text-[13.5px] text-[var(--ink-soft)]">
+      <div className="absolute bottom-2 left-0 top-2 w-px bg-[var(--hairline-strong)]" />
+      <div
+        className={`absolute left-[-3.5px] top-[10px] size-[8px] rounded-full ring-2 ring-[var(--paper)] ${
+          stateKind === "running"
+            ? "bg-[var(--accent)]"
+            : stateKind === "error"
+              ? "bg-[var(--warm-warning-ink)]"
+              : "bg-[var(--ink-soft)]"
+        }`}
+      />
+      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+        <Search className="size-3.5 shrink-0 text-[var(--muted)]" />
+        <span className="text-[13px] text-[var(--ink-soft)]">{label}</span>
+        <span
+          className={`rounded-full px-2 py-[2px] text-[10.5px] font-medium uppercase tracking-[0.14em] ${statePillClasses}`}
+        >
           {stateLabel}
         </span>
       </div>
 
-      {part.errorText ? (
-        <p className="ml-6 mt-2 text-sm text-[#9a3412]">{part.errorText}</p>
-      ) : null}
-
       {preview ? (
-        <p className="ml-6 mt-2 max-w-3xl text-[13px] leading-6 text-[#667085]">
+        <p className="mt-1.5 max-w-2xl text-[13px] leading-5 text-[var(--muted)]">
           {preview}
         </p>
       ) : null}
 
-      {part.input || part.output ? (
-        <details className="ml-6 mt-2 max-w-3xl rounded-2xl border border-[#eaecf0] bg-[#fcfcfd] px-3 py-2 text-xs text-[#667085]">
-          <summary className="cursor-pointer font-medium">
-            Tool details
-          </summary>
-          {part.input ? (
-            <>
-              <p className="mt-3 font-semibold text-[#475467]">Input</p>
-              <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded-xl bg-white p-3 text-[11px] leading-5 text-[#475467]">
-                {formatUnknown(part.input)}
-              </pre>
-            </>
-          ) : null}
+      {part.errorText ? (
+        <p className="mt-1.5 text-[13px] text-[var(--warm-warning-ink)]">
+          {part.errorText}
+        </p>
+      ) : null}
 
-          {part.output ? (
-            <>
-              <p className="mt-3 font-semibold text-[#475467]">Result</p>
-              <pre className="mt-1 max-h-52 overflow-auto whitespace-pre-wrap rounded-xl bg-white p-3 text-[11px] leading-5 text-[#475467]">
-                {formatUnknown(part.output)}
-              </pre>
-            </>
-          ) : null}
+      {part.input || part.output ? (
+        <details className="mt-2 max-w-2xl overflow-hidden rounded-lg border border-[var(--hairline)] bg-[var(--surface)] text-[12px] text-[var(--muted)]">
+          <summary className="flex cursor-pointer items-center gap-1.5 px-3 py-1.5 font-[family-name:var(--font-mono)] text-[11.5px] text-[var(--ink-soft)] transition hover:bg-[var(--hairline)]/30">
+            <ChevronRight className="size-3 shrink-0" />
+            Inspect
+          </summary>
+          <div className="space-y-3 border-t border-[var(--hairline)] p-3">
+            {part.input ? (
+              <div>
+                <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-[var(--muted)]">
+                  Input
+                </p>
+                <pre className="scrollbar-fine mt-1.5 max-h-44 overflow-auto whitespace-pre-wrap rounded-md bg-[var(--paper)] p-2.5 font-[family-name:var(--font-mono)] text-[11.5px] leading-[1.55] text-[var(--ink-soft)]">
+                  {formatUnknown(part.input)}
+                </pre>
+              </div>
+            ) : null}
+            {part.output ? (
+              <div>
+                <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-[var(--muted)]">
+                  Result
+                </p>
+                <pre className="scrollbar-fine mt-1.5 max-h-60 overflow-auto whitespace-pre-wrap rounded-md bg-[var(--paper)] p-2.5 font-[family-name:var(--font-mono)] text-[11.5px] leading-[1.55] text-[var(--ink-soft)]">
+                  {formatUnknown(part.output)}
+                </pre>
+              </div>
+            ) : null}
+          </div>
         </details>
       ) : null}
     </div>
@@ -622,12 +766,16 @@ function MarkdownContent({
     }
 
     if (trimmed.startsWith("### ")) {
+      const headingText = formatProviderPlanningHeading(
+        trimmed.replace(/^###\s+/, ""),
+      );
+
       blocks.push(
         <h3
           key={`h3-${index}`}
-          className="mt-6 text-base font-semibold leading-7 text-[#101828]"
+          className="mt-6 text-[15px] font-semibold leading-7 text-[var(--ink)]"
         >
-          <InlineText text={trimmed.replace(/^###\s+/, "")} />
+          <InlineText text={headingText} />
         </h3>,
       );
       index += 1;
@@ -635,12 +783,16 @@ function MarkdownContent({
     }
 
     if (trimmed.startsWith("## ")) {
+      const headingText = formatProviderPlanningHeading(
+        trimmed.replace(/^##\s+/, ""),
+      );
+
       blocks.push(
         <h2
           key={`h2-${index}`}
-          className="mt-6 text-lg font-semibold leading-7 text-[#101828]"
+          className="mt-6 text-[17px] font-semibold leading-7 text-[var(--ink)]"
         >
-          <InlineText text={trimmed.replace(/^##\s+/, "")} />
+          <InlineText text={headingText} />
         </h2>,
       );
       index += 1;
@@ -648,12 +800,16 @@ function MarkdownContent({
     }
 
     if (trimmed.startsWith("# ")) {
+      const headingText = formatProviderPlanningHeading(
+        trimmed.replace(/^#\s+/, ""),
+      );
+
       blocks.push(
         <h2
           key={`h1-${index}`}
-          className="mt-6 text-lg font-semibold leading-7 text-[#101828]"
+          className="mt-6 text-[18px] font-semibold leading-7 text-[var(--ink)]"
         >
-          <InlineText text={trimmed.replace(/^#\s+/, "")} />
+          <InlineText text={headingText} />
         </h2>,
       );
       index += 1;
@@ -663,9 +819,7 @@ function MarkdownContent({
     if (isBulletLine(line)) {
       const list = parseBulletList(lines, index);
 
-      blocks.push(
-        <BulletList key={`ul-${index}`} items={list.items} />,
-      );
+      blocks.push(<BulletList key={`ul-${index}`} items={list.items} />);
       index = list.nextIndex;
       continue;
     }
@@ -673,9 +827,7 @@ function MarkdownContent({
     if (isOrderedListLine(line)) {
       const list = parseOrderedList(lines, index);
 
-      blocks.push(
-        <OrderedList key={`ol-${index}`} items={list.items} />,
-      );
+      blocks.push(<OrderedList key={`ol-${index}`} items={list.items} />);
       index = list.nextIndex;
       continue;
     }
@@ -701,7 +853,7 @@ function MarkdownContent({
     }
 
     blocks.push(
-      <p key={`p-${index}`} className="my-2.5 text-[#344054]">
+      <p key={`p-${index}`} className="my-2.5 text-[var(--ink-soft)]">
         <InlineText text={paragraphLines.join(" ")} />
       </p>,
     );
@@ -712,12 +864,12 @@ function MarkdownContent({
 
 function BulletList({ items }: { items: BulletItem[] }) {
   return (
-    <ul className="my-3 list-disc space-y-1.5 pl-5 text-[#344054] marker:text-[#c0c7d2]">
+    <ul className="my-3 list-disc space-y-1.5 pl-5 text-[var(--ink-soft)] marker:text-[var(--muted-soft)]">
       {items.map((item, index) => (
         <li key={`${item.text}-${index}`}>
           <InlineText text={item.text} />
           {item.children.length > 0 ? (
-            <ul className="mt-1.5 list-disc space-y-1 pl-5 marker:text-[#d0d5dd]">
+            <ul className="mt-1.5 list-disc space-y-1 pl-5 marker:text-[var(--hairline-strong)]">
               {item.children.map((child, childIndex) => (
                 <li key={`${child}-${childIndex}`}>
                   <InlineText text={child} />
@@ -733,12 +885,12 @@ function BulletList({ items }: { items: BulletItem[] }) {
 
 function OrderedList({ items }: { items: BulletItem[] }) {
   return (
-    <ol className="my-3 list-decimal space-y-2 pl-5 text-[#344054] marker:text-[#667085]">
+    <ol className="my-3 list-decimal space-y-2 pl-5 text-[var(--ink-soft)] marker:text-[var(--muted)]">
       {items.map((item, index) => (
         <li key={`${item.text}-${index}`} className="pl-1">
           <InlineText text={item.text} />
           {item.children.length > 0 ? (
-            <ul className="mt-1.5 list-disc space-y-1 pl-5 marker:text-[#d0d5dd]">
+            <ul className="mt-1.5 list-disc space-y-1 pl-5 marker:text-[var(--hairline-strong)]">
               {item.children.map((child, childIndex) => (
                 <li key={`${child}-${childIndex}`}>
                   <InlineText text={child} />
@@ -769,7 +921,7 @@ function InlineText({ text }: { text: string }) {
               href={link[2]}
               target="_blank"
               rel="noreferrer"
-              className="font-semibold text-[#1f4e79] decoration-[#98a2b3] underline-offset-4 transition hover:text-[#12385a] hover:underline hover:decoration-[#1f4e79]"
+              className="font-medium text-[var(--accent)] decoration-[var(--muted-soft)] underline-offset-4 transition hover:text-[var(--ink)] hover:underline hover:decoration-[var(--accent)]"
               title={`Open ${link[2]}`}
             >
               {link[1]}
@@ -781,7 +933,7 @@ function InlineText({ text }: { text: string }) {
           return (
             <code
               key={`${part}-${index}`}
-              className="rounded-md bg-[#f2f4f7] px-1.5 py-0.5 font-mono text-[0.9em] text-[#344054]"
+              className="rounded-md bg-[var(--hairline)]/60 px-1.5 py-0.5 font-[family-name:var(--font-mono)] text-[0.88em] text-[var(--ink)]"
             >
               {part.slice(1, -1)}
             </code>
@@ -790,7 +942,10 @@ function InlineText({ text }: { text: string }) {
 
         if (part.startsWith("**") && part.endsWith("**")) {
           return (
-            <strong key={`${part}-${index}`} className="font-semibold text-[#101828]">
+            <strong
+              key={`${part}-${index}`}
+              className="font-semibold text-[var(--ink)]"
+            >
               <InlineText text={part.slice(2, -2)} />
             </strong>
           );
@@ -800,6 +955,23 @@ function InlineText({ text }: { text: string }) {
       })}
     </>
   );
+}
+
+function formatProviderPlanningHeading(text: string) {
+  if (/^Planning to call:/i.test(text)) {
+    return text;
+  }
+
+  const normalized = text.replace(/^\*\*([\s\S]+)\*\*$/, "$1").trim();
+  const bareProviderLink = normalized.match(
+    /^\[([^\]]*(?:API|Provider|Enrich)[^\]]*)\]\(https?:\/\/[^)\s]+\)$/,
+  );
+
+  if (!bareProviderLink) {
+    return text;
+  }
+
+  return `Planning to call: ${normalized}`;
 }
 
 function isBulletLine(line?: string) {
@@ -893,6 +1065,30 @@ function getToolLabel(toolName: string) {
   return labels[toolName] ?? "Used Orthogonal tool";
 }
 
+function getToolStateKind(part: ToolPart): ToolStateKind {
+  if (!part.state || part.state.startsWith("input-")) {
+    return "running";
+  }
+
+  if (part.state === "output-error" || part.errorText) {
+    return "error";
+  }
+
+  if (part.state === "output-available") {
+    const output = isRecord(part.output) ? part.output : null;
+
+    if (output?.notCalled === true) {
+      return "skipped";
+    }
+
+    if (output?.isError === true || output?.isValidationError === true) {
+      return "error";
+    }
+  }
+
+  return "done";
+}
+
 function getToolStateLabel(part: ToolPart) {
   if (!part.state || part.state.startsWith("input-")) {
     return "Running";
@@ -941,8 +1137,195 @@ function getToolResultPreview(part: ToolPart) {
   }
 
   const output = isRecord(part.output) ? part.output : null;
-  const pieces: string[] = [];
   const input = isRecord(part.input) ? part.input : null;
+  const toolName = getToolName(part);
+
+  if (output?.notCalled === true) {
+    const blockedReason =
+      typeof output.blockedReason === "string"
+        ? output.blockedReason
+        : "blocked by call safety guard";
+
+    return [
+      typeof input?.api === "string" ? `Provider ${input.api}` : null,
+      typeof input?.path === "string" ? `Endpoint ${input.path}` : null,
+      `Not called: ${blockedReason}`,
+      "No credits used",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+  }
+
+  if (toolName === "searchWeb") {
+    return formatSearchWebPreview(input, output);
+  }
+
+  if (toolName === "searchOrthogonalCatalog") {
+    return formatCatalogSearchPreview(input, output);
+  }
+
+  if (toolName === "describeOrthogonalEndpoint") {
+    return formatDescribePreview(input, output);
+  }
+
+  if (toolName === "runOrthogonalApi" || toolName === "enrichCompany") {
+    return formatPaidCallPreview(part, input, output, toolName);
+  }
+
+  return formatGenericPreview(part, input, output);
+}
+
+function formatSearchWebPreview(
+  input: Record<string, unknown> | null,
+  output: Record<string, unknown> | null,
+) {
+  const query = typeof input?.query === "string" ? input.query : "";
+  const pieces: string[] = [
+    query ? `Searched for "${shortenPreview(query)}"` : "Searched the web",
+  ];
+
+  if (output?.isError === true) {
+    pieces.push(`Failed: ${extractErrorPhrase(output)}`);
+    return pieces.join(" · ");
+  }
+
+  const count = getResultCount(output);
+  if (count !== null) {
+    pieces.push(`${count} result${count === 1 ? "" : "s"}`);
+  } else if (output?.isEmpty === true) {
+    pieces.push("No results");
+  }
+
+  return pieces.join(" · ");
+}
+
+function formatCatalogSearchPreview(
+  input: Record<string, unknown> | null,
+  output: Record<string, unknown> | null,
+) {
+  const prompt = typeof input?.prompt === "string" ? input.prompt : "";
+  const pieces: string[] = [
+    prompt
+      ? `Searched catalog for "${shortenPreview(prompt)}"`
+      : "Searched the API catalog",
+  ];
+
+  if (output?.isError === true) {
+    pieces.push(`Failed: ${extractErrorPhrase(output)}`);
+    return pieces.join(" · ");
+  }
+
+  const count = getResultCount(output);
+  if (count !== null && count > 0) {
+    pieces.push(`Found ${count} provider${count === 1 ? "" : "s"}`);
+  } else {
+    pieces.push("No matches");
+  }
+
+  return pieces.join(" · ");
+}
+
+function formatDescribePreview(
+  input: Record<string, unknown> | null,
+  output: Record<string, unknown> | null,
+) {
+  const api = typeof input?.api === "string" ? input.api : "endpoint";
+  const path = typeof input?.path === "string" ? input.path : "";
+  const pieces: string[] = [`Probed ${api}${path ? ` ${path}` : ""}`];
+
+  if (output?.acceptsEmpty === true) {
+    pieces.push("endpoint accepts empty body");
+    pieces.push("May have used credits");
+    return pieces.join(" · ");
+  }
+
+  const detailFields = getErrorDetailFields(output);
+  if (detailFields.length > 0) {
+    const shown = detailFields.slice(0, 5).join(", ");
+    const suffix = detailFields.length > 5 ? ", …" : "";
+    pieces.push(`schema: ${shown}${suffix}`);
+    return pieces.join(" · ");
+  }
+
+  if (output?.isError === true) {
+    pieces.push("no schema details returned");
+    return pieces.join(" · ");
+  }
+
+  const summary = typeof output?.summary === "string" ? output.summary : "";
+  if (summary) {
+    pieces.push(shortenPreview(summary));
+  }
+
+  return pieces.join(" · ");
+}
+
+function formatPaidCallPreview(
+  part: ToolPart,
+  input: Record<string, unknown> | null,
+  output: Record<string, unknown> | null,
+  toolName: string,
+) {
+  const pieces: string[] = [];
+
+  if (toolName === "enrichCompany") {
+    const domain = typeof input?.domain === "string" ? input.domain : "";
+    pieces.push(domain ? `Enriched ${domain}` : "Enriched company");
+  } else {
+    const api = typeof input?.api === "string" ? input.api : "Orthogonal";
+    pieces.push(`Called ${api} API`);
+  }
+
+  if (output?.isValidationError === true) {
+    const detail = getErrorDetailFields(output)
+      .map((field) => field)
+      .join(", ");
+    pieces.push(
+      detail
+        ? `Input error: ${detail}`
+        : `Input error: ${extractErrorPhrase(output)}`,
+    );
+    return pieces.join(" · ");
+  }
+
+  if (output?.isError === true) {
+    pieces.push(`Failed: ${extractErrorPhrase(output)}`);
+    return pieces.join(" · ");
+  }
+
+  if (isContactLookupTool(part)) {
+    if (output?.hasEmail === true) {
+      pieces.push("successfully retrieved email");
+    } else if (output?.hasEmail === false || output?.isEmpty === true) {
+      pieces.push("no email returned");
+    } else {
+      pieces.push("successfully retrieved data");
+    }
+  } else if (output?.isEmpty === true) {
+    pieces.push("no results returned");
+  } else if (output?.hasData === true) {
+    pieces.push("successfully retrieved data");
+  } else {
+    pieces.push("call completed");
+  }
+
+  if (output?.price !== null && output?.price !== undefined) {
+    pieces.push(`Cost ${String(output.price)}`);
+  }
+
+  if (output?.mayHaveCharged === true) {
+    pieces.push("May have used credits");
+  }
+
+  return pieces.join(" · ");
+}
+
+function formatGenericPreview(
+  part: ToolPart,
+  input: Record<string, unknown> | null,
+  output: Record<string, unknown> | null,
+) {
+  const pieces: string[] = [];
 
   if (typeof input?.api === "string") {
     pieces.push(`Provider ${input.api}`);
@@ -952,71 +1335,13 @@ function getToolResultPreview(part: ToolPart) {
     pieces.push(`Endpoint ${input.path}`);
   }
 
-  if (output?.notCalled === true) {
-    const blockedReason =
-      typeof output.blockedReason === "string"
-        ? output.blockedReason
-        : "blocked by call safety guard";
-
-    pieces.push(`Not called: ${blockedReason}`);
-    pieces.push("No credits used");
-
-    return pieces.join(" · ");
-  }
-
-  if (output?.requestId) {
-    pieces.push(`Request ${String(output.requestId)}`);
-  }
-
-  if (output?.mayHaveCharged === true) {
-    pieces.push("May have used credits");
-  }
-
-  if (output?.price !== null && output?.price !== undefined) {
-    pieces.push(`Cost ${String(output.price)}`);
-  }
-
-  if (output?.count !== null && output?.count !== undefined) {
-    pieces.push(`${String(output.count)} result${output.count === 1 ? "" : "s"}`);
-  }
-
-  if (output?.isValidationError === true) {
-    const errorMessage =
-      typeof output.errorMessage === "string" ? output.errorMessage : "";
-    const detail = Array.isArray(output.errorDetail)
-      ? output.errorDetail
-          .map((entry) => {
-            if (!isRecord(entry)) {
-              return "";
-            }
-
-            const field =
-              typeof entry.field === "string" ? entry.field : "field";
-            const type =
-              typeof entry.type === "string" ? entry.type : "invalid";
-
-            return `${field} (${type})`;
-          })
-          .filter(Boolean)
-          .join(", ")
-      : "";
-
-    pieces.push(
-      detail
-        ? `Input error: ${detail}`
-        : errorMessage || "Input error returned by provider",
-    );
-
-    return pieces.join(" · ");
-  }
-
   const summary = typeof output?.summary === "string" ? output.summary : "";
   const preview =
     typeof output?.dataPreview === "string" ? output.dataPreview : "";
   const outputText = formatUnknown(part.output);
 
   if (summary) {
-    pieces.push(summary);
+    pieces.push(shortenPreview(summary));
   } else if (isContactLookupTool(part) && !containsEmail(outputText)) {
     pieces.push("No email returned");
   } else if (preview) {
@@ -1026,15 +1351,78 @@ function getToolResultPreview(part: ToolPart) {
   return pieces.length > 0 ? pieces.join(" · ") : "Completed";
 }
 
+function getResultCount(output: Record<string, unknown> | null): number | null {
+  if (!output) {
+    return null;
+  }
+
+  if (Array.isArray(output.results)) {
+    return output.results.length;
+  }
+
+  if (typeof output.count === "number") {
+    return output.count;
+  }
+
+  return null;
+}
+
+function getErrorDetailFields(
+  output: Record<string, unknown> | null,
+): string[] {
+  if (!output || !Array.isArray(output.errorDetail)) {
+    return [];
+  }
+
+  const fields: string[] = [];
+  for (const entry of output.errorDetail) {
+    if (!isRecord(entry)) continue;
+    const field = typeof entry.field === "string" ? entry.field : "";
+    if (field && field !== "(unspecified)" && !fields.includes(field)) {
+      fields.push(field);
+    }
+  }
+  return fields;
+}
+
+function extractErrorPhrase(output: Record<string, unknown> | null): string {
+  if (!output) return "unknown error";
+  const errorMessage =
+    typeof output.errorMessage === "string" ? output.errorMessage : "";
+  if (errorMessage) {
+    return shortenPreview(errorMessage);
+  }
+  const summary = typeof output.summary === "string" ? output.summary : "";
+  if (summary) {
+    return shortenPreview(summary);
+  }
+  return "unknown error";
+}
+
 function isContactLookupTool(part: ToolPart) {
-  const text = `${getToolName(part)} ${formatUnknown(part.input)}`.toLowerCase();
+  const toolName = getToolName(part);
+
+  if (toolName !== "runOrthogonalApi" && toolName !== "enrichCompany") {
+    return false;
+  }
+
+  if (toolName === "enrichCompany") {
+    return false;
+  }
+
+  const input = isRecord(part.input) ? part.input : null;
+  const api = typeof input?.api === "string" ? input.api.toLowerCase() : "";
+  const path = typeof input?.path === "string" ? input.path.toLowerCase() : "";
+  const text = `${api} ${path}`;
 
   return (
     text.includes("email") ||
     text.includes("contact") ||
     text.includes("people") ||
     text.includes("person") ||
-    text.includes("apollo")
+    text.includes("lead") ||
+    api === "apollo" ||
+    api === "sixtyfour"
   );
 }
 
@@ -1081,4 +1469,56 @@ function formatUnknown(value: unknown) {
   } catch {
     return String(value);
   }
+}
+
+function filterConversations(items: Conversation[], query: string) {
+  const trimmed = query.trim().toLowerCase();
+  if (!trimmed) {
+    return items;
+  }
+  return items.filter((conversation) =>
+    conversation.title.toLowerCase().includes(trimmed),
+  );
+}
+
+function groupConversations(
+  items: Conversation[],
+): Array<[string, Conversation[]]> {
+  const now = new Date();
+  const startOfToday = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate(),
+  );
+  const startOfYesterday = new Date(startOfToday);
+  startOfYesterday.setDate(startOfYesterday.getDate() - 1);
+  const sevenDaysAgo = new Date(startOfToday);
+  sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+  const thirtyDaysAgo = new Date(startOfToday);
+  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+  const buckets: Record<string, Conversation[]> = {
+    Today: [],
+    Yesterday: [],
+    "Previous 7 days": [],
+    "Previous 30 days": [],
+    Older: [],
+  };
+
+  for (const conversation of items) {
+    const updated = new Date(conversation.updated_at);
+    if (updated >= startOfToday) {
+      buckets.Today.push(conversation);
+    } else if (updated >= startOfYesterday) {
+      buckets.Yesterday.push(conversation);
+    } else if (updated >= sevenDaysAgo) {
+      buckets["Previous 7 days"].push(conversation);
+    } else if (updated >= thirtyDaysAgo) {
+      buckets["Previous 30 days"].push(conversation);
+    } else {
+      buckets.Older.push(conversation);
+    }
+  }
+
+  return Object.entries(buckets).filter(([, list]) => list.length > 0);
 }

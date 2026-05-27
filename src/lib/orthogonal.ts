@@ -430,14 +430,14 @@ function buildNextStepHint({
 }): string | undefined {
   if (isError) {
     if (isValidationError) {
-      return "Do not retry this endpoint in the same response. Explain the missing/invalid fields and ask for corrected identifiers or input shape.";
+      return "Re-read errorDetail, fix the body shape, and re-present Step 3 yourself. Do not ask the user to correct field nesting.";
     }
 
-    return "Do not blindly retry. Explain the upstream failure and ask the user whether they want to try again or choose another provider.";
+    return "If the failure looks like a bad identifier, run one more searchWeb with a refined query and re-present Step 3. Otherwise tell the user the provider failed and stop.";
   }
 
   if (isEmpty) {
-    return "Do not automatically retry. Ask for stronger identifiers such as domain, LinkedIn URL, full name, or exact title.";
+    return "Run one more searchWeb for a stronger identifier (domain, LinkedIn URL, full name, exact title) and re-present Step 3 with the better input. Only ask the user if searchWeb truly returns nothing usable.";
   }
 
   if (hasEmail) {
@@ -471,16 +471,54 @@ function extractErrorDetail(
   const data = response.data;
   const detail = isRecord(data) ? data.detail : undefined;
 
-  if (!Array.isArray(detail)) {
-    if (typeof detail === "string" && detail.trim()) {
-      return [{ field: "(unspecified)", type: "error", msg: detail }];
+  if (Array.isArray(detail)) {
+    const entries: ErrorDetailEntry[] = [];
+
+    for (const item of detail) {
+      if (entries.length >= MAX_ERROR_DETAILS) {
+        break;
+      }
+
+      if (!isRecord(item)) {
+        continue;
+      }
+
+      const locValue = item.loc;
+      const field = Array.isArray(locValue)
+        ? locValue.map((part) => String(part)).join(".")
+        : typeof locValue === "string"
+          ? locValue
+          : "(unspecified)";
+      const type = typeof item.type === "string" ? item.type : "invalid";
+      const msg = typeof item.msg === "string" ? item.msg : "";
+
+      entries.push({ field, type, msg });
     }
+
+    if (entries.length > 0) {
+      return entries;
+    }
+  }
+
+  if (typeof detail === "string" && detail.trim()) {
+    return [{ field: "(unspecified)", type: "error", msg: detail }];
+  }
+
+  const errorsArrays: unknown[] = [];
+  if (isRecord(data) && Array.isArray(data.errors)) {
+    errorsArrays.push(...data.errors);
+  }
+  if (Array.isArray(response.errors)) {
+    errorsArrays.push(...response.errors);
+  }
+
+  if (errorsArrays.length === 0) {
     return undefined;
   }
 
   const entries: ErrorDetailEntry[] = [];
 
-  for (const item of detail) {
+  for (const item of errorsArrays) {
     if (entries.length >= MAX_ERROR_DETAILS) {
       break;
     }
@@ -489,19 +527,58 @@ function extractErrorDetail(
       continue;
     }
 
-    const locValue = item.loc;
-    const field = Array.isArray(locValue)
-      ? locValue.map((part) => String(part)).join(".")
-      : typeof locValue === "string"
-        ? locValue
-        : "(unspecified)";
-    const type = typeof item.type === "string" ? item.type : "invalid";
-    const msg = typeof item.msg === "string" ? item.msg : "";
+    const msg =
+      (typeof item.details === "string" && item.details) ||
+      (typeof item.message === "string" && item.message) ||
+      (typeof item.msg === "string" && item.msg) ||
+      "";
+    const typeRaw =
+      (typeof item.id === "string" && item.id) ||
+      (item.code !== undefined && item.code !== null && String(item.code)) ||
+      "";
+    const type = typeRaw || "invalid";
 
-    entries.push({ field, type, msg });
+    const fields = parseFieldsFromErrorMessage(msg);
+
+    if (fields.length === 0) {
+      entries.push({ field: "(unspecified)", type, msg });
+      continue;
+    }
+
+    for (const field of fields) {
+      if (entries.length >= MAX_ERROR_DETAILS) {
+        break;
+      }
+      entries.push({ field, type, msg });
+    }
   }
 
   return entries.length > 0 ? entries : undefined;
+}
+
+function parseFieldsFromErrorMessage(message: string): string[] {
+  if (!message) {
+    return [];
+  }
+
+  const missingOne = message.match(
+    /missing(?:\s+the)?\s+([A-Za-z_][A-Za-z0-9_]*)\s+parameter/i,
+  );
+  if (missingOne) {
+    return [missingOne[1]];
+  }
+
+  const oneOf = message.match(
+    /one of the following parameters?:\s*([A-Za-z0-9_,\s]+)/i,
+  );
+  if (oneOf) {
+    return oneOf[1]
+      .split(/[,\s]+/)
+      .map((part) => part.trim())
+      .filter((part) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(part));
+  }
+
+  return [];
 }
 
 function hasUsefulData(value: unknown): boolean {
