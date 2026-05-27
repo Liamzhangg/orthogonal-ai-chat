@@ -85,28 +85,6 @@ At scale, I would add:
 
 Deploy on Vercel and add the same environment variables in the Vercel project settings. The app calls Orthogonal directly from the Next.js server with `ORTHOGONAL_API_KEY`.
 
-## Local Orthogonal MCP
-
-MCP is optional developer tooling, not part of the production app. It can help a local coding agent inspect Orthogonal APIs while building, but the deployed chatbot should not depend on a local MCP client or server.
-
-Example MCP config for Cursor, Claude Code, or another MCP-compatible client:
-
-```json
-{
-  "mcpServers": {
-    "orthogonal": {
-      "url": "https://mcp.orth.sh"
-    }
-  }
-}
-```
-
-Production path:
-
-```text
-Next.js server -> Orthogonal REST API -> external data
-```
-
 ## What I Would Add With More Time
 
 - Real Supabase Auth instead of anonymous browser IDs.
