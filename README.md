@@ -87,7 +87,8 @@ Deploy on Vercel and add the same environment variables in the Vercel project se
 
 ## What I Would Add With More Time
 
-- Real Supabase Auth instead of anonymous browser IDs.
+- Real user accounts with Supabase Auth, Clerk, or Auth.js instead of anonymous browser IDs, so each user has private conversations, settings, and usage history.
+- Per-user Orthogonal API key management, with keys stored securely on the server and never exposed to the browser.
 - Conversation summary generation once a chat grows past a message threshold.
 - Better endpoint-specific tools for common GTM tasks like contact search and email verification.
 - User-facing cost controls before expensive Orthogonal calls.
